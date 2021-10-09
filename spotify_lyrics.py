@@ -6,11 +6,15 @@ from bs4 import BeautifulSoup
 import urllib.parse
 from threading import Thread
 
+"""note to self, if youre trying to fix this: Im sorry"""
 
 '''settings'''
 beginning_offset = 10
 ending_offset = 10
 debug = 0
+always_wait = True
+resume_playback_on_start = True
+deviceid_to_start_playback_on = '70a3d6ab6f7595485cc9f90f2bab7f290f040d31'
 
 '''advanced settings'''
 song_changed_check_delay = 10 # will check if the current song changed every this number of seconds
@@ -19,9 +23,10 @@ musical_title_length = 2#0 # wont modify title if under this len
 headers={'User-Agent': 'Mozilla/5.0'} # try not to get blocked by lyrics site
 redirect_uri='http://localhost:8080'
 scope = 'app-remote-control streaming user-read-playback-state user-modify-playback-state user-read-currently-playing user-read-playback-position' # I probably dont need all of these, but I dont feel like figuring out what I dont need so oh well
+no_lyrics_progress_bar_length = 50
 
 '''global variables setup'''
-potential_title_assumption = ''
+potential_title_assumption = ['', 'wait'][always_wait]
 song_changed = False
 go = True
 wait=False
@@ -104,53 +109,76 @@ def print_lyrics(lyrics, track_info):
     song_changed_thread = Thread(target=check_if_song_changed, args=[track_info['track'],track_info['artist']])
     song_changed_thread.start()
 
+    if lyrics:
+        current_progress = track_info['progress'] + time.time() - start_time # current progress in song accounting for time to get lyrics
 
-    current_progress = track_info['progress'] + time.time() - start_time # current progress in song accounting for time to get lyrics
+        lyrics_start_time = beginning_offset
+        lyrics_end_time = track_info['duration'] - ending_offset
+        offset_duration = lyrics_end_time - lyrics_start_time
 
-    lyrics_start_time = beginning_offset
-    lyrics_end_time = track_info['duration'] - ending_offset
-    offset_duration = lyrics_end_time - lyrics_start_time
+        if current_progress > lyrics_start_time:
+            offset_progress = current_progress - lyrics_start_time
+        else:
+            time.sleep(lyrics_start_time - current_progress)
+            offset_progress = 0
 
-    if current_progress > lyrics_start_time:
-        offset_progress = current_progress - lyrics_start_time
-    else:
-        time.sleep(lyrics_start_time - current_progress)
-        offset_progress = 0
+        lyrics_playing_now = int(offset_progress/offset_duration * len(lyrics))
+        if debug:
+            print('offset_progress: {}\n offset_duration: {}\n lyrics_playing_now: {}\n length of lyrics: {}\n lyrics left: {}'.format(offset_progress,offset_duration,lyrics_playing_now, len(lyrics), len(lyrics)-lyrics_playing_now))
 
-    lyrics_playing_now = int(offset_progress/offset_duration * len(lyrics))
-    if debug:
-        print('offset_progress: {}\n offset_duration: {}\n lyrics_playing_now: {}\n length of lyrics: {}\n lyrics left: {}'.format(offset_progress,offset_duration,lyrics_playing_now, len(lyrics), len(lyrics)-lyrics_playing_now))
+        print(lyrics[:lyrics_playing_now], end='', flush=True) # prints alrady heard lyrics
 
-    print(lyrics[:lyrics_playing_now], end='', flush=True) # prints alrady heard lyrics
+        print_start_time=time.time()
+        print_end_time=print_start_time + offset_duration - offset_progress
 
-    print_start_time=time.time()
-    print_end_time=print_start_time + offset_duration - offset_progress
+        for i in range(lyrics_playing_now, len(lyrics)):
+            if song_changed or not go:
+                if debug:
+                    print('song_changed: {}, go: {}'.format(song_changed,go))
+                return 0
 
-    for i in range(lyrics_playing_now, len(lyrics)):
-        if song_changed or not go:
-            if debug:
-                print('song_changed: {}, go: {}'.format(song_changed,go))
-            return 0
+            char = lyrics[i]
+            print(char,end='', flush=True)
 
-        char = lyrics[i]
-        print(char,end='', flush=True)
+            chars_left = len(lyrics) - i
+            time_left = print_end_time - time.time()
+            sleep_time = time_left/chars_left
+            if sleep_time > 0:
+                time.sleep(sleep_time)
 
-        chars_left = len(lyrics) - i
-        time_left = print_end_time - time.time()
-        sleep_time = time_left/chars_left
+        sleep_time = (print_end_time + ending_offset + 1)-time.time()
         if sleep_time > 0:
             time.sleep(sleep_time)
 
+    else:
+        current_progress = track_info['progress'] + (time.time() - start_time)
+        track_start_time = time.time() - current_progress
+        track_end_time = track_start_time + track_info['duration']
+        done = False
+        while go:
+            if time.time() > track_end_time or song_changed:
+                break
+
+            current_progress = time.time()-track_start_time
+            percent_done = current_progress/track_info['duration']
+            print('[ {} ]'.format('='*int(no_lyrics_progress_bar_length*percent_done) + ' '*int(no_lyrics_progress_bar_length-(no_lyrics_progress_bar_length*percent_done))), end='\r')
+            time.sleep(no_lyrics_progress_bar_length/track_info['duration'])
     song_changed = True
     song_changed_thread.join()
     song_changed = False
 
-    sleep_time = (print_end_time + ending_offset + 1)-time.time()
-    if sleep_time > 0:
-        time.sleep(sleep_time)
 
 if __name__=='__main__':
     sp = spotipy.Spotify(auth_manager=SpotifyOAuth(scope=scope, client_id=client_ID, client_secret=client_secret, redirect_uri=redirect_uri))#cache_path='.cacheee'))
+
+    if resume_playback_on_start:
+        current_playback = sp.current_playback()
+        if debug:
+            print("current playback is:", current_playback)
+        if current_playback == None or current_playback['device']['is_active'] == False:
+            sp.start_playback(device_id=deviceid_to_start_playback_on)
+            time.sleep(1)
+
     while go:
         try:
             track_info = get_current_track_info()
@@ -167,8 +195,9 @@ if __name__=='__main__':
                     print('unable to find lyrics for {} by {}'.format(track_info['track'],track_info['artist']))
                     potential_title = potential_title_assumption or input('press enter when the next song is playing OR enter title to try searching for lyrics with OR type "wait" to auto-detect when next song is playing OR type "always wait" to stop asking this: ')
                     if potential_title.lower() == "wait":
-                        lyrics = '..........\n'*10
+                        lyrics = None #'..........\n'*10
                         wait=True
+                        break
                     elif potential_title.lower() == 'always wait':
                         potential_title_assumption = 'wait'
                     elif len(potential_title) > 0:
